@@ -558,6 +558,8 @@ implements ResourceScheduler, CapacitySchedulerContext {
     // 1. Check for reserved applications
     // 2. Schedule if there are no reservations
 
+    // If we have have an application that has reserved a resource on this node
+    // already, we try to complete the reservation.
     RMContainer reservedContainer = node.getReservedContainer();
     if (reservedContainer != null) {
       SchedulerApp reservedApplication = 

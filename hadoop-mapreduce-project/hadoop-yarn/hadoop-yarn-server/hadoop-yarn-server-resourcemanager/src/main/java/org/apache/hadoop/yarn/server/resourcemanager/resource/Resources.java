@@ -74,6 +74,22 @@ public class Resources {
   public static Resource multiply(Resource lhs, int by) {
     return multiplyTo(clone(lhs), by);
   }
+  
+  public static Resource min(Resource lhs, Resource rhs) {
+    if (lessThan(lhs, rhs)) {
+      return lhs;
+    } else {
+      return rhs;
+    }
+  }
+  
+  public static Resource max(Resource lhs, Resource rhs) {
+    if (greaterThan(lhs, rhs)) {
+      return lhs;
+    } else {
+      return rhs;
+    }
+  }
 
   public static boolean equals(Resource lhs, Resource rhs) {
     return lhs.getMemory() == rhs.getMemory();

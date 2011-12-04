@@ -711,6 +711,8 @@ public class LeafQueue implements CSQueue {
       LOG.debug("assignContainers: node=" + node.getHostName()
         + " #applications=" + activeApplications.size());
     }
+    // We could be here because this node has reserved containers, so first
+    // handle that case.
     
     // Check for reserved resources
     RMContainer reservedContainer = node.getReservedContainer();
@@ -799,6 +801,7 @@ public class LeafQueue implements CSQueue {
   private synchronized Resource assignReservedContainer(SchedulerApp application, 
       SchedulerNode node, RMContainer rmContainer, Resource clusterResource) {
     // Do we still need this reservation?
+    // PATRICK: how might this have been already filled?
     Priority priority = rmContainer.getReservedPriority();
     if (application.getTotalRequiredResources(priority) == 0) {
       // Release
@@ -966,6 +969,18 @@ public class LeafQueue implements CSQueue {
     return (((starvation + requiredContainers) - reservedContainers) > 0);
   }
 
+  /**
+   * Try to assign a container on Node to fulfill one of application's
+   * requests that has Priority priority. If reservedContainer is not null,
+   * try to allocate this container. First, attempt to assign data local,
+   * then rack-local, then off switch containers.
+   * @param clusterResource
+   * @param node
+   * @param application
+   * @param priority
+   * @param reservedContainer
+   * @return
+   */
   private Resource assignContainersOnNode(Resource clusterResource, 
       SchedulerNode node, SchedulerApp application, 
       Priority priority, RMContainer reservedContainer) {
@@ -996,6 +1011,7 @@ public class LeafQueue implements CSQueue {
   private Resource assignNodeLocalContainers(Resource clusterResource, 
       SchedulerNode node, SchedulerApp application, 
       Priority priority, RMContainer reservedContainer) {
+    // Do you have any node-local requests for me?
     ResourceRequest request = 
         application.getResourceRequest(priority, node.getHostName());
     if (request != null) {
@@ -1121,6 +1137,18 @@ public class LeafQueue implements CSQueue {
     return container;
   }
   
+  /**
+   * Assign a container to this node to facilitate request. If node does not
+   * have enough memory, create a reservation.
+   * @param clusterResource
+   * @param node
+   * @param application
+   * @param priority
+   * @param request
+   * @param type
+   * @param rmContainer
+   * @return
+   */
   private Resource assignContainer(Resource clusterResource, SchedulerNode node, 
       SchedulerApp application, Priority priority, 
       ResourceRequest request, NodeType type, RMContainer rmContainer) {

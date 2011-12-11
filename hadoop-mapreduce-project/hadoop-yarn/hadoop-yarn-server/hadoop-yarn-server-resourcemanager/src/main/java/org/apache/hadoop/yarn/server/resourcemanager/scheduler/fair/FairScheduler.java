@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,9 +49,11 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.Store.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptRejectedEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -59,6 +62,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppRepor
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
@@ -94,12 +98,12 @@ public class FairScheduler implements ResourceScheduler {
       CONFIG_PREFIX + "maximum-allocation-mb";
   
   // Defaults for min/max allocation
-  private static final int MINIMUM_MEMORY = 1024;
+  private static final int MINIMUM_MEMORY = 512;
   private static final int MAXIMUM_MEMORY = 10240;
 
   // This stores per-application scheduling information, indexed by
   // attempt ID's for fast lookup.
-  private Map<ApplicationAttemptId, SchedulerApp> applications
+  protected Map<ApplicationAttemptId, SchedulerApp> applications
   = new HashMap<ApplicationAttemptId, SchedulerApp>();
   
   // Nodes in the cluster, indexed by NodeId
@@ -113,6 +117,12 @@ public class FairScheduler implements ResourceScheduler {
   protected boolean sizeBasedWeight; // Give larger weights to larger jobs
   protected WeightAdjuster weightAdjuster; // Can be null for no weight adjuster
 
+  private final static List<Container> EMPTY_CONTAINER_LIST = 
+      new ArrayList<Container>();
+  
+  private static final Allocation EMPTY_ALLOCATION = 
+      new Allocation(EMPTY_CONTAINER_LIST, Resources.createResource(0));
+  
 
   public Configuration getConf() {
     return this.conf;
@@ -130,19 +140,22 @@ public class FairScheduler implements ResourceScheduler {
     return scheds;
   }
   
+  private RMContainer getRMContainer(ContainerId containerId) {
+    SchedulerApp application = 
+        applications.get(containerId.getApplicationAttemptId());
+    return (application == null) ? null : application.getRMContainer(containerId);
+  }
+  
   /**
   * Recompute the internal variables used by the scheduler - per-job weights,
   * fair shares, deficits, minimum slot allocations, and amount of used and
   * required resources per job.
   */
-  protected void update() {
-   // TODO: Locality delay stuff
-    
+  protected void update() {    
     synchronized (this) {
       // TODO: reload allocation file?
     
-      // TODO: runnability
-      //updateRunnability(); // Set job runnability based on user/pool limits 
+      updateRunnability(); // Set job runnability based on user/pool limits 
       
       // Update demands of apps and pools
       for (Pool pool: poolMgr.getPools()) {
@@ -158,20 +171,56 @@ public class FairScheduler implements ResourceScheduler {
       for (Pool pool: poolMgr.getPools()) {
         pool.getPoolSchedulable().redistributeShare();
       }
-           
-      // TODO preemption
-
     }
   }
   
+  /**
+   * This updates the runnability of all apps based on whether or not
+   * any users/pools have exceeded their capacity.
+   */
+  private void updateRunnability() {
+    List<AppSchedulable> apps = new ArrayList<AppSchedulable>();
+    
+    // Start by marking everything as not runnable
+    for (Pool p: poolMgr.getPools()) {
+      for (AppSchedulable a: p.getPoolSchedulable().getAppSchedulables()) {
+        a.getApp().setRunnable(false);
+        apps.add(a);
+      }
+    }
+    // Create a list of sorted jobs in order of start time and priority
+    Collections.sort(apps, new FifoAppComparator());
+    // Mark jobs as runnable in order of start time and priority, until
+    // user or pool limits have been reached.
+    Map<String, Integer> userJobs = new HashMap<String, Integer>();
+    Map<String, Integer> poolJobs = new HashMap<String, Integer>();
+    for (AppSchedulable app: apps) {
+      String user = app.getApp().getUser();
+      String pool = app.getApp().getQueueName();
+      int userCount = userJobs.containsKey(user) ? userJobs.get(user) : 0;
+      int poolCount = poolJobs.containsKey(pool) ? poolJobs.get(pool) : 0;
+      if (userCount < poolMgr.getUserMaxApps(user) &&
+          poolCount < poolMgr.getPoolMaxApps(pool)) {
+        userJobs.put(user, userCount + 1);
+        poolJobs.put(pool, poolCount + 1);
+        app.getApp().setRunnable(true);
+      }
+    }
+  }
+  
+  public ContainerTokenSecretManager getContainerTokenSecretManager() {
+    return this.containerTokenSecretManager;
+  }
+  
   public double getAppWeight(AppSchedulable app) {
-    if (!app.getApp().isPending()) { // TODO is pending right?
+    if (!app.getApp().isRunnable()) {
       // Job won't launch tasks, but don't return 0 to avoid division errors
       return 1.0;
     } else {
       double weight = 1.0;
       if (sizeBasedWeight) {
         // Set weight based on runnable tasks
+        // TODO: maybe this should consider both current and pending resources?
         weight = Math.log1p(app.getResourceUsage().getMemory()) / Math.log(2);
       }
       weight *= app.getPriority().getPriority(); // TODO maybe use indirect function of prio
@@ -183,20 +232,6 @@ public class FairScheduler implements ResourceScheduler {
     }
   }
   
-
-  @Override
-  public QueueInfo getQueueInfo(String queueName, boolean includeChildQueues,
-      boolean recursive) throws IOException {
-    // TODO Auto-generated method stub
-    return null;
-  }
-
-  @Override
-  public List<QueueUserACLInfo> getQueueUserAclInfo() {
-    // TODO Auto-generated method stub
-    return null;
-  }
-
   @Override
   public Resource getMinimumResourceCapability() {
     return this.minimumAllocation;
@@ -211,19 +246,7 @@ public class FairScheduler implements ResourceScheduler {
     return this.clusterCapacity;
   }
 
-  // TODO move these guys up
-  private final static List<Container> EMPTY_CONTAINER_LIST = 
-      new ArrayList<Container>();
-  
-  private static final Allocation EMPTY_ALLOCATION = 
-      new Allocation(EMPTY_CONTAINER_LIST, Resources.createResource(0));
-  
-  private RMContainer getRMContainer(ContainerId containerId) {
-    SchedulerApp application = 
-        applications.get(containerId.getApplicationAttemptId());
-    return (application == null) ? null : application.getRMContainer(containerId);
-  }
-  
+
   /**
    * Add a new application to the scheduler, with a given id, pool name,
    * and user.
@@ -261,13 +284,54 @@ public class FairScheduler implements ResourceScheduler {
             RMAppAttemptEventType.APP_ACCEPTED));
   }
   
+  private synchronized void removeApplication(
+      ApplicationAttemptId applicationAttemptId,
+      RMAppAttemptState rmAppAttemptFinalState) {
+    LOG.info("Application " + applicationAttemptId + " is done." +
+        " finalState=" + rmAppAttemptFinalState);
+    
+    SchedulerApp application = applications.get(applicationAttemptId);
+
+    if (application == null) {
+      LOG.info("Unknown application " + applicationAttemptId + " has completed!");
+      return;
+    }
+    
+    // Release all the running containers 
+    for (RMContainer rmContainer : application.getLiveContainers()) {
+      completedContainer(rmContainer, 
+          SchedulerUtils.createAbnormalContainerStatus(
+              rmContainer.getContainerId(), 
+              SchedulerUtils.COMPLETED_APPLICATION), 
+          RMContainerEventType.KILL);
+    }
+    
+     // Release all reserved containers
+    for (RMContainer rmContainer : application.getReservedContainers()) {
+      completedContainer(rmContainer, 
+          SchedulerUtils.createAbnormalContainerStatus(
+              rmContainer.getContainerId(), 
+              "Application Complete"), 
+          RMContainerEventType.KILL);
+    }
+    
+    // Clean up pending requests, metrics etc.
+    application.stop(rmAppAttemptFinalState);
+    
+    // Inform the pool
+    Pool pool = this.poolMgr.getPool(application.getQueue().getQueueName());
+    pool.removeJob(application);
+    
+    // Remove from our data-structure
+    applications.remove(applicationAttemptId);
+  }
+  
   /**
    * Clean up a completed container. This involves (TODO)
    * @param rmContainer
    * @param containerStatus
    * @param event
    */
-  @Lock(CapacityScheduler.class)
   private synchronized void completedContainer(RMContainer rmContainer,
       ContainerStatus containerStatus, RMContainerEventType event) {
     if (rmContainer == null) {
@@ -298,6 +362,43 @@ public class FairScheduler implements ResourceScheduler {
         " released container " + container.getId() +
         " on node: " + node + 
         " with event: " + event);
+  }
+  
+  private synchronized void addNode(RMNode node) {
+    this.nodes.put(node.getNodeID(), new SchedulerNode(node));
+    Resources.addTo(clusterCapacity, node.getTotalCapability());
+    
+    LOG.info("Added node " + node.getNodeAddress() + 
+        " cluster capacity: " + clusterCapacity);
+  }
+
+  private synchronized void removeNode(RMNode rmNode) {
+    SchedulerNode node = this.nodes.get(rmNode.getNodeID());
+    Resources.subtractFrom(clusterCapacity, rmNode.getTotalCapability());
+
+    // Remove running containers
+    List<RMContainer> runningContainers = node.getRunningContainers();
+    for (RMContainer container : runningContainers) {
+      completedContainer(container, 
+          SchedulerUtils.createAbnormalContainerStatus(
+              container.getContainerId(), 
+              SchedulerUtils.LOST_CONTAINER), 
+          RMContainerEventType.KILL);
+    }
+    
+    // Remove reservations, if any
+    RMContainer reservedContainer = node.getReservedContainer();
+    if (reservedContainer != null) {
+      completedContainer(reservedContainer, 
+          SchedulerUtils.createAbnormalContainerStatus(
+              reservedContainer.getContainerId(), 
+              SchedulerUtils.LOST_CONTAINER), 
+          RMContainerEventType.KILL);
+    }
+
+    this.nodes.remove(rmNode.getNodeID());
+    LOG.info("Removed node " + rmNode.getNodeAddress() + 
+        " cluster capacity: " + clusterCapacity);
   }
   
   @Override
@@ -361,6 +462,74 @@ public class FairScheduler implements ResourceScheduler {
           application.getHeadroom());
     }
   }
+  
+  private void containerLaunchedOnNode(ContainerId containerId, SchedulerNode node) {
+    // Get the application for the finished container
+    ApplicationAttemptId applicationAttemptId = containerId.getApplicationAttemptId();
+    SchedulerApp application = applications.get(applicationAttemptId);
+    if (application == null) {
+      LOG.info("Unknown application: " + applicationAttemptId + 
+          " launched container " + containerId +
+          " on node: " + node);
+      return;
+    }
+    
+    application.containerLaunchedOnNode(containerId);
+  }
+  
+  private synchronized void nodeUpdate(RMNode nm, 
+      List<ContainerStatus> newlyLaunchedContainers,
+      List<ContainerStatus> completedContainers) {
+    LOG.info("nodeUpdate: " + nm + " cluster capacity: " + clusterCapacity);
+    
+    SchedulerNode node = nodes.get(nm.getNodeID());
+
+    // Processing the newly launched containers
+    for (ContainerStatus launchedContainer : newlyLaunchedContainers) {
+      containerLaunchedOnNode(launchedContainer.getContainerId(), node);
+    }
+
+    // Process completed containers
+    for (ContainerStatus completedContainer : completedContainers) {
+      ContainerId containerId = completedContainer.getContainerId();
+      LOG.debug("Container FINISHED: " + containerId);
+      completedContainer(getRMContainer(containerId), 
+          completedContainer, RMContainerEventType.FINISHED);
+    }
+
+    // Assign new containers...
+    // 1. Check for reserved applications
+    // 2. Schedule if there are no reservations
+
+    // If we have have an application that has reserved a resource on this node
+    // already, we try to complete the reservation.
+    RMContainer reservedContainer = node.getReservedContainer();
+    if (reservedContainer != null) {
+      SchedulerApp reservedApplication = 
+          applications.get(reservedContainer.getApplicationAttemptId());
+      
+      // Try to fulfill the reservation
+      LOG.info("Trying to fulfill reservation for application " + 
+          reservedApplication.getApplicationId() + " on node: " + nm);
+      
+      Pool pool = poolMgr.getPool(reservedApplication.getQueueName());
+      pool.getPoolSchedulable().assignContainer(node, true);
+    }
+
+    
+    // Otherwise, schedule at pool which is furthest below fair share
+    else {
+      List<PoolSchedulable> scheds = this.getPoolSchedulables();
+      Collections.sort(scheds, new SchedulingAlgorithms.FairShareComparator());
+      //TODO: RETURN IF SCHEDULE ANYTHING HERE
+      for (PoolSchedulable sched : scheds) {
+        Resource assigned = sched.assignContainer(node, false);
+        if (Resources.greaterThan(assigned, Resources.none())) {
+          break;
+        }
+      }
+    }
+  }
 
   @Override
   public SchedulerNodeReport getNodeReport(NodeId nodeId) {
@@ -387,21 +556,22 @@ public class FairScheduler implements ResourceScheduler {
     case NODE_ADDED:
     {
       NodeAddedSchedulerEvent nodeAddedEvent = (NodeAddedSchedulerEvent)event;
-      Resources.addTo(clusterCapacity, nodeAddedEvent.getAddedRMNode().getTotalCapability());
+      addNode(nodeAddedEvent.getAddedRMNode());
     }
     break;
     case NODE_REMOVED:
     {
       NodeRemovedSchedulerEvent nodeRemovedEvent = (NodeRemovedSchedulerEvent)event;
-      Resources.subtractFrom(clusterCapacity, nodeRemovedEvent.getRemovedRMNode().getTotalCapability());
+      removeNode(nodeRemovedEvent.getRemovedRMNode());
     }
     break;
     case NODE_UPDATE:
     {
       NodeUpdateSchedulerEvent nodeUpdatedEvent = 
       (NodeUpdateSchedulerEvent)event;
-      
-      // TODO: The main node assignment logic should go here
+      this.nodeUpdate(nodeUpdatedEvent.getRMNode(), 
+          nodeUpdatedEvent.getNewlyLaunchedContainers(),
+          nodeUpdatedEvent.getCompletedContainers());
     }
     break;
     case APP_ADDED:
@@ -414,6 +584,8 @@ public class FairScheduler implements ResourceScheduler {
     case APP_REMOVED:
     {
       AppRemovedSchedulerEvent appRemovedEvent = (AppRemovedSchedulerEvent)event;
+      this.removeApplication(appRemovedEvent.getApplicationAttemptID(),
+          appRemovedEvent.getFinalAttemptState());
     }
     break;
     case CONTAINER_EXPIRED:
@@ -471,6 +643,19 @@ public class FairScheduler implements ResourceScheduler {
         throw new IOException("Failed to initialize FairScheduler", e);
       }
     }
+  }
+
+  @Override
+  public QueueInfo getQueueInfo(String queueName, boolean includeChildQueues,
+      boolean recursive) throws IOException {
+    // TODO Auto-generated method stub
+    return null;
+  }
+
+  @Override
+  public List<QueueUserACLInfo> getQueueUserAclInfo() {
+    // TODO Auto-generated method stub
+    return null;
   }
 
 }

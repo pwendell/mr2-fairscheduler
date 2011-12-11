@@ -19,17 +19,28 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.QueueACL;
+import org.apache.hadoop.yarn.api.records.QueueInfo;
+import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.factories.RecordFactory;
+import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 
 public class PoolSchedulable extends Schedulable {
   public static final Log LOG = LogFactory.getLog(
@@ -41,6 +52,9 @@ public class PoolSchedulable extends Schedulable {
   private List<AppSchedulable> appScheds = new LinkedList<AppSchedulable>();
   private Resource demand = Resources.createResource(0);
   private QueueMetrics metrics;
+  private RecordFactory recordFactory = 
+      RecordFactoryProvider.getRecordFactory(null);
+
   
   
   // Variables used for preemption
@@ -51,7 +65,7 @@ public class PoolSchedulable extends Schedulable {
     this.scheduler = scheduler;
     this.pool = pool;
     this.poolMgr = scheduler.getPoolManager();
-    long currentTime = System.currentTimeMillis(); // TODO mock this out
+    long currentTime = System.currentTimeMillis();
     this.lastTimeAtMinShare = currentTime;
     this.lastTimeAtHalfFairShare = currentTime;
     this.metrics = QueueMetrics.forQueue(this.getName(), null, true);
@@ -127,47 +141,49 @@ public class PoolSchedulable extends Schedulable {
     return 0;
   }
   
-  /**
   @Override
-  public JobPriority getPriority() {
-    return JobPriority.NORMAL;
+  public Resource assignContainer(SchedulerNode node, boolean reserved) {
+    // If this pool is over its limit, reject
+    if (Resources.greaterThan(this.getResourceUsage(), 
+        poolMgr.getMaxResources(pool.getName()))) {
+      return Resources.none();
+    }
+    
+    // If this node already has reserved resources for an app, first try to
+    // finish allocating resources for that app.
+    if (reserved) {
+      for (AppSchedulable sched : appScheds) {
+        if (sched.getApp().getApplicationAttemptId() == 
+            node.getReservedContainer().getApplicationAttemptId()) {
+          return sched.assignContainer(node, reserved);
+        }
+      }
+      return Resources.none(); // We should never get here
+    }
+    
+    // Otherwise, chose app to schedule based on given policy (fair vs fifo).
+    else {
+      SchedulingMode mode = pool.getSchedulingMode();
+      
+      Comparator<Schedulable> comparator;
+      if (mode == SchedulingMode.FIFO) {
+        comparator = new SchedulingAlgorithms.FifoComparator();
+      } else if (mode == SchedulingMode.FAIR) {
+        comparator = new SchedulingAlgorithms.FairShareComparator();
+      } else {
+        throw new RuntimeException("Unsupported pool scheduling mode " + mode);
+      }
+      
+      Collections.sort(appScheds, comparator);
+      for (AppSchedulable sched: appScheds) {
+        return sched.assignContainer(node, reserved);
+      }
+      
+      return Resources.none();
+    }
+    
   }
 
-
-  @Override
-  public int getRunningTasks() {
-    int ans = 0;
-    for (JobSchedulable sched: jobScheds) {
-      ans += sched.getRunningTasks();
-    }
-    return ans;
-  }
-
-  @Override
-  public Task assignTask(TaskTrackerStatus tts, long currentTime,
-      Collection<JobInProgress> visited) throws IOException {
-    int runningTasks = getRunningTasks();
-    if (runningTasks >= poolMgr.getMaxSlots(pool.getName(), taskType)) {
-      return null;
-    }
-    SchedulingMode mode = pool.getSchedulingMode();
-    Comparator<Schedulable> comparator;
-    if (mode == SchedulingMode.FIFO) {
-      comparator = new SchedulingAlgorithms.FifoComparator();
-    } else if (mode == SchedulingMode.FAIR) {
-      comparator = new SchedulingAlgorithms.FairShareComparator();
-    } else {
-      throw new RuntimeException("Unsupported pool scheduling mode " + mode);
-    }
-    Collections.sort(jobScheds, comparator);
-    for (JobSchedulable sched: jobScheds) {
-      Task task = sched.assignTask(tts, currentTime, visited);
-      if (task != null)
-        return task;
-    }
-    return null;
-  }
-  */
   @Override
   public String getName() {
     return pool.getName();
@@ -203,38 +219,46 @@ public class PoolSchedulable extends Schedulable {
 
   @Override
   public QueueMetrics getMetrics() {
-    // TODO Auto-generated method stub
-    return null;
+    return metrics;
   }
 
   @Override
   public Resource getResourceUsage() {
+    Resource usage = Resources.createResource(0);
+    for (AppSchedulable app : appScheds) {
+      Resources.addTo(usage, app.getResourceUsage());
+    }
+    return usage;
+  }
+
+  @Override
+  public Priority getPriority() {
+    Priority p = recordFactory.newRecordInstance(Priority.class);
+    p.setPriority(1);
+    return p;
+  }
+
+  @Override
+  public String getQueueName() {
     // TODO Auto-generated method stub
     return null;
   }
 
   @Override
-  public Priority getPriority() {
-    // TODO figure this out
-    return org.apache.hadoop.yarn.server.resourcemanager.resource.Priority.create(0);
+  public Map<QueueACL, AccessControlList> getQueueAcls() {
+    // TODO Auto-generated method stub
+    return null;
   }
 
-  /*
   @Override
-  public void updateMetrics() {
-    super.setMetricValues(metrics);
-    
-    if (scheduler.isPreemptionEnabled()) {
-      // These won't be set if preemption is off
-      long lastCheck = scheduler.getLastPreemptionUpdateTime();
-      metrics.setMetric("millisSinceAtMinShare", lastCheck - lastTimeAtMinShare);
-      metrics.setMetric("millisSinceAtHalfFairShare", lastCheck - lastTimeAtHalfFairShare);
-    }
-    metrics.update();
-
-    for (JobSchedulable job : jobScheds) {
-      job.updateMetrics();
-    }
+  public QueueInfo getQueueInfo(boolean includeChildQueues, boolean recursive) {
+    // TODO Auto-generated method stub
+    return null;
   }
-  */
+
+  @Override
+  public List<QueueUserACLInfo> getQueueUserAclInfo(UserGroupInformation user) {
+    // TODO Auto-generated method stub
+    return null;
+  }
 }

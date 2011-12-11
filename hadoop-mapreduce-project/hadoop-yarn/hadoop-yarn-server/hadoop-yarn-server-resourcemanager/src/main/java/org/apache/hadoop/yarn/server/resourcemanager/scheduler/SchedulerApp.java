@@ -83,6 +83,9 @@ public class SchedulerApp {
 
   final Map<Priority, Map<NodeId, RMContainer>> reservedContainers = 
       new HashMap<Priority, Map<NodeId, RMContainer>>();
+  
+  // Is this applicaton allowed to shchedule requests right now?
+  private boolean isRunnable = false;
     
   /**
    * Count how many times the application has been given an opportunity
@@ -118,6 +121,14 @@ public class SchedulerApp {
 
   public String getUser() {
     return this.appSchedulingInfo.getUser();
+  }
+  
+  public boolean isRunnable() {
+    return this.isRunnable;
+  }
+  
+  public void setRunnable(boolean isRunnable) {
+    this.isRunnable = isRunnable;
   }
 
   public synchronized void updateResourceRequests(

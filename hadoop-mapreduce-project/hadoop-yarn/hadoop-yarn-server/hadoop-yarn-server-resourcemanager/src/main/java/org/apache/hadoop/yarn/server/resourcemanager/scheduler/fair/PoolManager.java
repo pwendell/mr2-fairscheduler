@@ -149,6 +149,13 @@ public class PoolManager {
   }
   
   /**
+   * Get the pool for a given AppSchedulable.
+   */
+  public Pool getPoolForApp(AppSchedulable app) {
+    return this.getPool(app.getApp().getQueueName());
+  }
+  
+  /**
    * Reload allocations file if it hasn't been loaded in a while
    */
   public void reloadAllocsIfNecessary() {

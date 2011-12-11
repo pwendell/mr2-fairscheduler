@@ -21,7 +21,10 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 
 /**
  * A Schedulable represents an entity that can launch tasks, such as a job
@@ -52,15 +55,9 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
  *   the other Schedulables within it (e.g. for pools that want to perform fair
  *   sharing among their jobs).
  */
-abstract class Schedulable {
+abstract class Schedulable implements Queue {
   /** Fair share assigned to this Schedulable */
   private Resource fairShare = Resources.createResource(0);
-  
-  /**
-   * PATRICK: Not sure how these metrics are going to come into play
-   * @return
-   */
-  public abstract QueueMetrics getMetrics();
   
   /**
    * Name of job/pool, used for debugging as well as for breaking ties in
@@ -100,29 +97,14 @@ abstract class Schedulable {
    */
   public abstract void redistributeShare();
   
-  /** HIDDEN FOR NOW
   /**
-   * Obtain a task for a given TaskTracker, or null if the Schedulable has
-   * no tasks to launch at this moment or does not wish to launch a task on
-   * this TaskTracker (e.g. is waiting for a TaskTracker with local data). 
-   * In addition, if a job is skipped during this search because it is waiting
-   * for a TaskTracker with local data, this method is expected to add it to
-   * the <tt>visited</tt> collection passed in, so that the scheduler can
-   * properly mark it as skipped during this heartbeat. Please see
-   * {@link FairScheduler#getAllowedLocalityLevel(JobInProgress, long)}
-   * for details of delay scheduling (waiting for trackers with local data).
-   * 
-   * @param tts      TaskTracker that the task will be launched on
-   * @param currentTime Cached time (to prevent excessive calls to gettimeofday)
-   * @param visited  A Collection to which this method must add all jobs that
-   *                 were considered during the search for a job to assign.
-   * @return Task to launch, or null if Schedulable cannot currently launch one.
-   * @throws IOException Possible if obtainNew(Map|Reduce)Task throws exception.
-
-  public abstract Task assignTask(TaskTrackerStatus tts, long currentTime,
-      Collection<JobInProgress> visited) throws IOException;
-  */
-
+   * Assign a container on this node if possible, and return the amount of
+   * resources assigned. If {@code reserved} is true, it means a reservation
+   * already exists on this node, and the schedulable should fulfill that
+   * reservation if possible. 
+   */
+  public abstract Resource assignContainer(SchedulerNode node, boolean reserved);
+  
   /** Assign a fair share to this Schedulable. */
   public void setFairShare(Resource fairShare) {
     this.fairShare = fairShare;

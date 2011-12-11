@@ -14,6 +14,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
@@ -27,6 +28,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeRemovedSchedulerEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -88,13 +90,19 @@ public class TestFairScheduler {
    * Creates a single container priority-1 request and submits to 
    * scheduler.
    */
-  private void createSchedulingRequest(int memory, String poolId, String userId) {
+  private ApplicationAttemptId createSchedulingRequest(int memory, String poolId, String userId) {
+    return createSchedulingRequest(memory, poolId, userId, 1);
+  }
+
+  
+  private ApplicationAttemptId createSchedulingRequest(int memory, String poolId, String userId, int numContainers) {
     ApplicationAttemptId id = createAppAttemptId(this.APP_ID++, this.ATTEMPT_ID++);
     scheduler.addApplication(id, poolId, userId);
     List<ResourceRequest> ask = new ArrayList<ResourceRequest>();
-    ResourceRequest request = createResourceRequest(memory, "*", 1, 1);
+    ResourceRequest request = createResourceRequest(memory, "*", 1, numContainers);
     ask.add(request);
     scheduler.allocate(id, ask,  new ArrayList<ContainerId>());
+    return id;
   }
   
   // TESTS
@@ -140,6 +148,85 @@ public class TestFairScheduler {
         assertEquals(5120, p.getPoolSchedulable().getFairShare().getMemory());
       }
     }
+  }
+  
+  @Test
+  public void testSimpleContainerAllocation() {
+    // Add a node
+    RMNode node1 = MockNodes.newNodeInfo(1, Resources.createResource(1024));
+    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
+    scheduler.handle(nodeEvent1);
+    
+    // Add another node
+    RMNode node2 = MockNodes.newNodeInfo(1, Resources.createResource(512));
+    NodeAddedSchedulerEvent nodeEvent2 = new NodeAddedSchedulerEvent(node2);
+    scheduler.handle(nodeEvent2);
+ 
+    createSchedulingRequest(512, "pool1", "user1", 2);
+    
+    scheduler.update();
+    
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node1,
+      new ArrayList<ContainerStatus>(), new ArrayList<ContainerStatus>());
+    scheduler.handle(updateEvent);
+    
+    assertEquals(512, scheduler.getPoolManager().getPool("pool1").
+        getPoolSchedulable().getResourceUsage().getMemory());
+    
+    NodeUpdateSchedulerEvent updateEvent2 = new NodeUpdateSchedulerEvent(node2,
+        new ArrayList<ContainerStatus>(), new ArrayList<ContainerStatus>());
+    scheduler.handle(updateEvent2);
+      
+    assertEquals(1024, scheduler.getPoolManager().getPool("pool1").
+      getPoolSchedulable().getResourceUsage().getMemory());
+  }
+  
+  @Test
+  public void testSimpleContainerReservation() throws InterruptedException {
+    // Add a node
+    RMNode node1 = MockNodes.newNodeInfo(1, Resources.createResource(1024));
+    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
+    scheduler.handle(nodeEvent1);
+    
+    // Pool 1 requests full capacity of node
+    createSchedulingRequest(1024, "pool1", "user1", 1);
+    scheduler.update();
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node1,
+      new ArrayList<ContainerStatus>(), new ArrayList<ContainerStatus>());
+    scheduler.handle(updateEvent);
+    
+    // Make sure pool 1 is allocated app capacity
+    assertEquals(1024, scheduler.getPoolManager().getPool("pool1").
+        getPoolSchedulable().getResourceUsage().getMemory());
+    
+    // Now pool 2 requests likewise
+    ApplicationAttemptId attId = createSchedulingRequest(1024, "pool2", "user1", 1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+      
+    // Make sure pool 2 is waiting with a reservation
+    assertEquals(0, scheduler.getPoolManager().getPool("pool2").
+      getPoolSchedulable().getResourceUsage().getMemory());
+    assertEquals(1024, scheduler.applications.get(attId).getCurrentReservation().getMemory());
+    
+    // Now another node checks in with capacity
+    RMNode node2 = MockNodes.newNodeInfo(1, Resources.createResource(1024));
+    NodeAddedSchedulerEvent nodeEvent2 = new NodeAddedSchedulerEvent(node2);
+    NodeUpdateSchedulerEvent updateEvent2 = new NodeUpdateSchedulerEvent(node2,
+        new ArrayList<ContainerStatus>(), new ArrayList<ContainerStatus>());
+    scheduler.handle(nodeEvent2);
+    scheduler.handle(updateEvent2);
+
+    // Make sure this goes to pool 2
+    assertEquals(1024, scheduler.getPoolManager().getPool("pool2").
+        getPoolSchedulable().getResourceUsage().getMemory());
+    
+    // The old reservation should still be there...
+    assertEquals(1024, scheduler.applications.get(attId).getCurrentReservation().getMemory());
+    // ... but it should disappear when we update the first node.
+    scheduler.handle(updateEvent);
+    assertEquals(0, scheduler.applications.get(attId).getCurrentReservation().getMemory());
+    
   }
   
   @Test
@@ -207,8 +294,8 @@ public class TestFairScheduler {
     
     // Second ask, pool2 requests 1024 + (2 * 512)
     List<ResourceRequest> ask2 = new ArrayList<ResourceRequest>();
-    ResourceRequest request2 = createResourceRequest(1024, "*", 1, 1);
-    ResourceRequest request3 = createResourceRequest(512, "*", 1, 2);
+    ResourceRequest request2 = createResourceRequest(1024, "foo", 1, 1);
+    ResourceRequest request3 = createResourceRequest(512, "bar", 1, 2);
     ask2.add(request2);
     ask2.add(request3);
     scheduler.allocate(id21, ask2, new ArrayList<ContainerId>());

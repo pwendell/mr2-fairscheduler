@@ -385,6 +385,8 @@ public class TestFairScheduler {
     assertEquals(15, poolManager.getPoolMaxApps("poolE"));
     assertEquals(10, poolManager.getUserMaxApps("user1"));
     assertEquals(5, poolManager.getUserMaxApps("user2"));
+    
+    /** Not currently supported
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout(
         Pool.DEFAULT_POOL_NAME));
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout("poolA"));
@@ -394,6 +396,7 @@ public class TestFairScheduler {
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout("poolA"));
     assertEquals(60000, poolManager.getMinSharePreemptionTimeout("poolE"));
     assertEquals(300000, poolManager.getFairSharePreemptionTimeout());
+    */
   }
   
   

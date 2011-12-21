@@ -55,19 +55,11 @@ public class PoolSchedulable extends Schedulable {
   private RecordFactory recordFactory = 
       RecordFactoryProvider.getRecordFactory(null);
 
-  
-  
-  // Variables used for preemption
-  long lastTimeAtMinShare;
-  long lastTimeAtHalfFairShare;
-
   public PoolSchedulable(FairScheduler scheduler, Pool pool) {
     this.scheduler = scheduler;
     this.pool = pool;
     this.poolMgr = scheduler.getPoolManager();
     long currentTime = System.currentTimeMillis();
-    this.lastTimeAtMinShare = currentTime;
-    this.lastTimeAtHalfFairShare = currentTime;
     this.metrics = QueueMetrics.forQueue(this.getName(), null, true);
     
   }
@@ -143,6 +135,7 @@ public class PoolSchedulable extends Schedulable {
   
   @Override
   public Resource assignContainer(SchedulerNode node, boolean reserved) {
+    LOG.info("Node offered to pool: " + this.getName() + " reserved: " + reserved);
     // If this pool is over its limit, reject
     if (Resources.greaterThan(this.getResourceUsage(), 
         poolMgr.getMaxResources(pool.getName()))) {
@@ -195,22 +188,6 @@ public class PoolSchedulable extends Schedulable {
   
   public Collection<AppSchedulable> getAppSchedulables() {
     return appScheds;
-  }
-  
-  public long getLastTimeAtMinShare() {
-    return lastTimeAtMinShare;
-  }
-  
-  public void setLastTimeAtMinShare(long lastTimeAtMinShare) {
-    this.lastTimeAtMinShare = lastTimeAtMinShare;
-  }
-  
-  public long getLastTimeAtHalfFairShare() {
-    return lastTimeAtHalfFairShare;
-  }
-  
-  public void setLastTimeAtHalfFairShare(long lastTimeAtHalfFairShare) {
-    this.lastTimeAtHalfFairShare = lastTimeAtHalfFairShare;
   }
 
   protected String getMetricsContextName() {

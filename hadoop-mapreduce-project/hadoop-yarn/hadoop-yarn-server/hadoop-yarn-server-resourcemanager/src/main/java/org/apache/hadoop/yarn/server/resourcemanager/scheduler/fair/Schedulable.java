@@ -21,9 +21,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
-import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 
 /**
@@ -108,6 +106,7 @@ abstract class Schedulable implements Queue {
   /** Assign a fair share to this Schedulable. */
   public void setFairShare(Resource fairShare) {
     this.fairShare = fairShare;
+    this.getMetrics().setAvailableResourcesToQueue(fairShare);
   }
   
   /** Get the fair share assigned to this Schedulable. */

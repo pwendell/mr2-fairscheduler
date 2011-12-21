@@ -71,7 +71,7 @@ public class Pool implements Queue {
   
   public void addApp(SchedulerApp app) {
     applications.add(app);
-    poolSchedulable.addApp(new AppSchedulable(scheduler, app));
+    poolSchedulable.addApp(new AppSchedulable(scheduler, app, this));
   }
   
   public void removeJob(SchedulerApp app) {

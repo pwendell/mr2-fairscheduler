@@ -84,7 +84,7 @@ public class SchedulerApp {
   final Map<Priority, Map<NodeId, RMContainer>> reservedContainers = 
       new HashMap<Priority, Map<NodeId, RMContainer>>();
   
-  // Is this applicaton allowed to shchedule requests right now?
+  // Is this applicaton allowed to schedule requests right now?
   private boolean isRunnable = false;
     
   /**

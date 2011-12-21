@@ -31,7 +31,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.yarn.Lock;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -62,9 +61,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppRepor
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ContainerExpiredSchedulerEvent;
@@ -100,7 +96,16 @@ public class FairScheduler implements ResourceScheduler {
   // Defaults for min/max allocation
   private static final int MINIMUM_MEMORY = 512;
   private static final int MAXIMUM_MEMORY = 10240;
-
+  
+  // How often fair shares are re-calculated (ms)
+  protected long UPDATE_INTERVAL = 500;
+  
+  private final static List<Container> EMPTY_CONTAINER_LIST = 
+      new ArrayList<Container>();
+  
+  private static final Allocation EMPTY_ALLOCATION = 
+      new Allocation(EMPTY_CONTAINER_LIST, Resources.createResource(0));
+  
   // This stores per-application scheduling information, indexed by
   // attempt ID's for fast lookup.
   protected Map<ApplicationAttemptId, SchedulerApp> applications
@@ -117,12 +122,11 @@ public class FairScheduler implements ResourceScheduler {
   protected boolean sizeBasedWeight; // Give larger weights to larger jobs
   protected WeightAdjuster weightAdjuster; // Can be null for no weight adjuster
 
-  private final static List<Container> EMPTY_CONTAINER_LIST = 
-      new ArrayList<Container>();
+  // Metrics for root queue
+  public QueueMetrics rootMetrics;
   
-  private static final Allocation EMPTY_ALLOCATION = 
-      new Allocation(EMPTY_CONTAINER_LIST, Resources.createResource(0));
-  
+  // Last time the fair shares were updated (used as a timer to force updates)
+  protected long lastUpdate = 0;
 
   public Configuration getConf() {
     return this.conf;
@@ -144,6 +148,27 @@ public class FairScheduler implements ResourceScheduler {
     SchedulerApp application = 
         applications.get(containerId.getApplicationAttemptId());
     return (application == null) ? null : application.getRMContainer(containerId);
+  }
+  
+  /**
+   * A thread which calls {@link FairScheduler#update()} every
+   * <code>UPDATE_INTERVAL</code> milliseconds.
+   */
+  private class UpdateThread extends Thread {
+    private UpdateThread() {
+      super("FairScheduler update thread");
+    }
+
+    public void run() {
+      while (initialized) {
+        try {
+          Thread.sleep(UPDATE_INTERVAL);
+          update();
+        } catch (Exception e) {
+          LOG.error("Exception in fair scheduler UpdateThread", e);
+        }
+      }
+    }
   }
   
   /**
@@ -171,6 +196,10 @@ public class FairScheduler implements ResourceScheduler {
       for (Pool pool: poolMgr.getPools()) {
         pool.getPoolSchedulable().redistributeShare();
       }
+      
+      // Update recorded capacity of root queue (child pools are updated 
+      // when fair share is calculated).
+      this.rootMetrics.setAvailableResourcesToQueue(clusterCapacity);
     }
   }
   
@@ -266,12 +295,14 @@ public class FairScheduler implements ResourceScheduler {
       return;
     }
     
-    // The Store class seems completely unused.
+
     SchedulerApp schedulerApp = 
         new SchedulerApp(applicationAttemptId, user, pool, rmContext, null);
 
-   // TODO: ACL
+   // TODO: ACL enforce if neecssary
     pool.addApp(schedulerApp);
+    pool.getMetrics().submitApp(user);
+    rootMetrics.submitApp(user);
 
     applications.put(applicationAttemptId, schedulerApp);
 
@@ -354,7 +385,6 @@ public class FairScheduler implements ResourceScheduler {
     // Get the node on which the container was allocated
     SchedulerNode node = nodes.get(container.getNodeId());
 
-    // TODO, not sure if this is all we need to do here (see Capacity)
     application.containerCompleted(rmContainer, containerStatus, event);
     node.unreserveResource(application);
 
@@ -521,7 +551,6 @@ public class FairScheduler implements ResourceScheduler {
     else {
       List<PoolSchedulable> scheds = this.getPoolSchedulables();
       Collections.sort(scheds, new SchedulingAlgorithms.FairShareComparator());
-      //TODO: RETURN IF SCHEDULE ANYTHING HERE
       for (PoolSchedulable sched : scheds) {
         Resource assigned = sched.assignContainer(node, false);
         if (Resources.greaterThan(assigned, Resources.none())) {
@@ -533,25 +562,33 @@ public class FairScheduler implements ResourceScheduler {
 
   @Override
   public SchedulerNodeReport getNodeReport(NodeId nodeId) {
-    // TODO Auto-generated method stub
-    return null;
+    SchedulerNode node = nodes.get(nodeId);
+    return node == null ? null : new SchedulerNodeReport(node);
   }
 
   @Override
   public SchedulerAppReport getSchedulerAppInfo(
       ApplicationAttemptId appAttemptId) {
-    // TODO Auto-generated method stub
-    return null;
+    if (!this.applications.containsKey(appAttemptId)) {
+      LOG.error("Request for appInfo of uknown attempt" + appAttemptId);
+      return null;
+    }
+    return new SchedulerAppReport(this.applications.get(appAttemptId));
   }
 
   @Override
   public QueueMetrics getRootQueueMetrics() {
-    // TODO Auto-generated method stub
-    return null;
+    return this.rootMetrics;
   }
 
   @Override
   public void handle(SchedulerEvent event) {
+    if (System.currentTimeMillis() > lastUpdate + UPDATE_INTERVAL) {
+      // We do this in lieu of having an update thread
+      this.update();
+      lastUpdate = System.currentTimeMillis();
+    }
+    
     switch(event.getType()) {
     case NODE_ADDED:
     {
@@ -592,16 +629,22 @@ public class FairScheduler implements ResourceScheduler {
     {
       ContainerExpiredSchedulerEvent containerExpiredEvent = 
           (ContainerExpiredSchedulerEvent) event;
+      ContainerId containerId = containerExpiredEvent.getContainerId();
+      completedContainer(getRMContainer(containerId), 
+          SchedulerUtils.createAbnormalContainerStatus(
+              containerId, 
+              SchedulerUtils.EXPIRED_CONTAINER), 
+          RMContainerEventType.EXPIRE);
     }
     break;
     default:
-      // TODO: Handle ERROR
+      LOG.error("Unknown event arrived at FairScheduler: " + event.toString());
     }
   }
 
   @Override
   public void recover(RMState state) throws Exception {
-    // TODO Auto-generated method stub
+    // TODO PWENDELL
     
   }
 
@@ -615,11 +658,15 @@ public class FairScheduler implements ResourceScheduler {
       this.conf = conf;
       this.containerTokenSecretManager = containerTokenSecretManager;
       this.rmContext = rmContext;
+      this.rootMetrics = QueueMetrics.forQueue("root", null, true);
       minimumAllocation = 
         Resources.createResource(conf.getInt(MINIMUM_ALLOCATION_CONFIG, MINIMUM_MEMORY));
       maximumAllocation = 
         Resources.createResource(conf.getInt(MAXIMUM_ALLOCATION_CONFIG, MAXIMUM_MEMORY));
+      // TODO check if this is mocked or not
+      new UpdateThread().start();
       initialized = true;
+      
       
       sizeBasedWeight = conf.getBoolean(
           CONFIG_PREFIX + ".sizebasedweight", false);
@@ -636,8 +683,8 @@ public class FairScheduler implements ResourceScheduler {
       this.conf = conf;
       
       try {
-       poolMgr.reloadAllocs(); //TODO: Maybe this should be based on a timer like
-                               // in the old incarnation. Not sure of semantics of reinit.
+       poolMgr.reloadAllocs();
+                               
       }
       catch (Exception e) {
         throw new IOException("Failed to initialize FairScheduler", e);

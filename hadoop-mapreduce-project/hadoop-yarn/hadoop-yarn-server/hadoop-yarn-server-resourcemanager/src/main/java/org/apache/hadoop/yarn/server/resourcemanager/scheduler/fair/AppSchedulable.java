@@ -57,12 +57,13 @@ public class AppSchedulable extends Schedulable {
   private long startTime;
   private static RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
   private static final Log LOG = LogFactory.getLog(AppSchedulable.class);
-
+  private Pool pool;
   
-  public AppSchedulable(FairScheduler scheduler, SchedulerApp app) {
+  public AppSchedulable(FairScheduler scheduler, SchedulerApp app, Pool pool) {
     this.scheduler = scheduler;
     this.app = app;
     this.startTime = System.currentTimeMillis();
+    this.pool = pool;
   }
   
   @Override
@@ -116,7 +117,7 @@ public class AppSchedulable extends Schedulable {
 
   @Override
   public QueueMetrics getMetrics() {
-    return scheduler.getPoolManager().getPoolForApp(this).getMetrics();
+    return this.pool.getMetrics();
   }
 
   @Override
@@ -188,6 +189,10 @@ public class AppSchedulable extends Schedulable {
       RMContainer rmContainer = application.reserve(node, priority, null,
           container);
       node.reserveResource(application, priority, rmContainer);
+      pool.getMetrics().reserveResource(this.app.getUser(),
+          container.getResource());
+      scheduler.getRootQueueMetrics().reserveResource(this.app.getUser(),
+          container.getResource());
     }
     
     else {
@@ -208,6 +213,8 @@ public class AppSchedulable extends Schedulable {
     application.unreserve(node, priority);
     node.unreserveResource(application);
     getMetrics().unreserveResource(
+        application.getUser(), rmContainer.getContainer().getResource());
+    scheduler.getRootQueueMetrics().unreserveResource(
         application.getUser(), rmContainer.getContainer().getResource());
   }
 
@@ -249,6 +256,7 @@ public class AppSchedulable extends Schedulable {
         // Did the application need this resource?
         return Resources.none();
       }
+      
 
       // If we had previously made a reservation, delete it
       if (reserved) {
@@ -274,7 +282,8 @@ public class AppSchedulable extends Schedulable {
   
   @Override
   public Resource assignContainer(SchedulerNode node, boolean reserved) {
-   
+    LOG.info("Node offered to app: " + getName() + " reserved: " + reserved);
+    
     if (reserved) {
       RMContainer rmContainer = node.getReservedContainer();
       Priority priority = rmContainer.getReservedPriority();
@@ -327,8 +336,6 @@ public class AppSchedulable extends Schedulable {
       // or off switch request
       for (Priority priority : app.getPriorities()) {
         app.addSchedulingOpportunity(priority);
-        
-        // TODO: Delay scheduling
         
         ResourceRequest localRequest = app.getResourceRequest(priority, 
             node.getHostName());

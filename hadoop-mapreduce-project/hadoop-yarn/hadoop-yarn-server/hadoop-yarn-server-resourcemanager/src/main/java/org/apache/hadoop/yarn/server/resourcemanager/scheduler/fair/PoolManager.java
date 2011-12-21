@@ -36,7 +36,6 @@ import javax.xml.parsers.ParserConfigurationException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.metrics.MetricsContext;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
@@ -82,20 +81,6 @@ public class PoolManager {
   private int userMaxAppsDefault = Integer.MAX_VALUE;
   private int poolMaxAppsDefault = Integer.MAX_VALUE;
 
-  // Min share preemption timeout for each pool in seconds. If a job in the pool
-  // waits this long without receiving its guaranteed share, it is allowed to
-  // preempt other jobs' tasks.
-  private Map<String, Long> minSharePreemptionTimeouts =
-    new HashMap<String, Long>();
-  
-  // Default min share preemption timeout for pools where it is not set
-  // explicitly.
-  private long defaultMinSharePreemptionTimeout = Long.MAX_VALUE;
-  
-  // Preemption timeout for jobs below fair share in seconds. If a job remains
-  // below half its fair share for this long, it is allowed to preempt tasks.
-  private long fairSharePreemptionTimeout = Long.MAX_VALUE;
-  
   SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
   
   private Object allocFile; // Path to XML file containing allocations. This
@@ -220,8 +205,6 @@ public class PoolManager {
     Map<String, Long> minSharePreemptionTimeouts = new HashMap<String, Long>();
     int userMaxAppsDefault = Integer.MAX_VALUE;
     int poolMaxAppsDefault = Integer.MAX_VALUE;
-    long fairSharePreemptionTimeout = Long.MAX_VALUE;
-    long defaultMinSharePreemptionTimeout = Long.MAX_VALUE;
     SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
     
     // Remember all pool names so we can display them on web UI, etc.
@@ -309,16 +292,8 @@ public class PoolManager {
       } else if ("poolMaxAppsDefault".equals(element.getTagName())) {
         String text = ((Text)element.getFirstChild()).getData().trim();
         int val = Integer.parseInt(text);
-        poolMaxAppsDefault = val;
-      } else if ("fairSharePreemptionTimeout".equals(element.getTagName())) {
-        String text = ((Text)element.getFirstChild()).getData().trim();
-        long val = Long.parseLong(text) * 1000L;
-        fairSharePreemptionTimeout = val;
-      } else if ("defaultMinSharePreemptionTimeout".equals(element.getTagName())) {
-        String text = ((Text)element.getFirstChild()).getData().trim();
-        long val = Long.parseLong(text) * 1000L;
-        defaultMinSharePreemptionTimeout = val;
-      } else if ("defaultPoolSchedulingMode".equals(element.getTagName())) {
+        poolMaxAppsDefault = val;}
+      else if ("defaultPoolSchedulingMode".equals(element.getTagName())) {
         String text = ((Text)element.getFirstChild()).getData().trim();
         defaultSchedulingMode = parseSchedulingMode(text);
       } else {
@@ -334,11 +309,8 @@ public class PoolManager {
       this.poolMaxApps = poolMaxApps;
       this.userMaxApps = userMaxApps;
       this.poolWeights = poolWeights;
-      this.minSharePreemptionTimeouts = minSharePreemptionTimeouts;
       this.userMaxAppsDefault = userMaxAppsDefault;
       this.poolMaxAppsDefault = poolMaxAppsDefault;
-      this.fairSharePreemptionTimeout = fairSharePreemptionTimeout;
-      this.defaultMinSharePreemptionTimeout = defaultMinSharePreemptionTimeout;
       this.defaultSchedulingMode = defaultSchedulingMode;
       for (String name: poolNamesInAllocFile) {
         Pool pool = getPool(name);
@@ -401,16 +373,6 @@ public class PoolManager {
   public synchronized void removeJob(SchedulerApp app) {
     getPool(app.getQueueName()).removeJob(app);
   }
-  
-  /**
-   * Change the pool of a particular job. TODO I don't think we can support this
-   
-  public synchronized void setPool(JobInProgress job, String pool) {
-    removeJob(job);
-    job.getJobConf().set(EXPLICIT_POOL_PROPERTY, pool);
-    addJob(job);
-  }
-  */
 
   /**
    * Get a collection of all pools
@@ -456,34 +418,4 @@ public class PoolManager {
       return 1.0;
     }
   }
-
-  /**
-   * Get a pool's min share preemption timeout, in milliseconds. This is the
-   * time after which jobs in the pool may kill other pools' tasks if they
-   * are below their min share.
-   */
-  public long getMinSharePreemptionTimeout(String pool) {
-    if (minSharePreemptionTimeouts.containsKey(pool)) {
-      return minSharePreemptionTimeouts.get(pool);
-    } else {
-      return defaultMinSharePreemptionTimeout;
-    }
-  }
-  
-  /**
-   * Get the fair share preemption, in milliseconds. This is the time
-   * after which any job may kill other jobs' tasks if it is below half
-   * its fair share.
-   */
-  public long getFairSharePreemptionTimeout() {
-    return fairSharePreemptionTimeout;
-  }
-
-  /*
-  synchronized void updateMetrics() {
-    for (Pool pool : pools.values()) {
-      pool.updateMetrics();
-    }
-  }
-  */
 }

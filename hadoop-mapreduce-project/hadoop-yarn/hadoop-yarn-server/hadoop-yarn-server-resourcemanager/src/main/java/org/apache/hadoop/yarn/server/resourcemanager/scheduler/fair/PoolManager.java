@@ -1,3 +1,21 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 /**
@@ -36,7 +54,10 @@ import javax.xml.parsers.ParserConfigurationException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.w3c.dom.Document;
@@ -63,8 +84,6 @@ public class PoolManager {
    */
   public static final long ALLOC_RELOAD_WAIT = 5 * 1000; 
 
-  public static final String EXPLICIT_POOL_PROPERTY = "mapred.fairscheduler.pool";
-
   private final FairScheduler scheduler;
   
   // Minimum resource allocation for each pool
@@ -80,6 +99,10 @@ public class PoolManager {
   private Map<String, Integer> userMaxApps = new HashMap<String, Integer>();
   private int userMaxAppsDefault = Integer.MAX_VALUE;
   private int poolMaxAppsDefault = Integer.MAX_VALUE;
+  
+  // ACL's for each pool. Only specifies non-default ACL's from configuration.
+  private Map<String, Map<QueueACL, AccessControlList>> poolAcls = 
+      new HashMap<String, Map<QueueACL, AccessControlList>>();
 
   SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
   
@@ -116,8 +139,8 @@ public class PoolManager {
     reloadAllocs();
     lastSuccessfulReload = System.currentTimeMillis();
     lastReloadAttempt = System.currentTimeMillis();
-    // Create the default pool so that it shows up in the web UI
-    getPool(Pool.DEFAULT_POOL_NAME);
+    // Create the default pool
+    getPool(YarnConfiguration.DEFAULT_QUEUE_NAME);
   }
   
   /**
@@ -131,6 +154,13 @@ public class PoolManager {
       pools.put(name, pool);
     }
     return pool;
+  }
+  
+  /**
+   * Return whether a pool exists already.
+   */
+  public synchronized boolean exists(String name) {
+    return pools.containsKey(name);
   }
   
   /**
@@ -203,6 +233,8 @@ public class PoolManager {
     Map<String, Double> poolWeights = new HashMap<String, Double>();
     Map<String, SchedulingMode> poolModes = new HashMap<String, SchedulingMode>();
     Map<String, Long> minSharePreemptionTimeouts = new HashMap<String, Long>();
+    Map<String, Map<QueueACL, AccessControlList>> poolAcls = 
+        new HashMap<String, Map<QueueACL, AccessControlList>>();
     int userMaxAppsDefault = Integer.MAX_VALUE;
     int poolMaxAppsDefault = Integer.MAX_VALUE;
     SchedulingMode defaultSchedulingMode = SchedulingMode.FAIR;
@@ -233,6 +265,8 @@ public class PoolManager {
       Element element = (Element)node;
       if ("pool".equals(element.getTagName())) {
         String poolName = element.getAttribute("name");
+        Map<QueueACL, AccessControlList> acls = 
+            new HashMap<QueueACL, AccessControlList>();
         poolNamesInAllocFile.add(poolName);
         NodeList fields = element.getChildNodes();
         for (int j = 0; j < fields.getLength(); j++) {
@@ -263,8 +297,15 @@ public class PoolManager {
           } else if ("schedulingMode".equals(field.getTagName())) {
             String text = ((Text)field.getFirstChild()).getData().trim();
             poolModes.put(poolName, parseSchedulingMode(text));
-          }
+          } else if ("aclSubmitApps".equals(field.getTagName())) {
+            String text = ((Text)field.getFirstChild()).getData().trim();
+            acls.put(QueueACL.SUBMIT_APPLICATIONS, new AccessControlList(text));
+          } else if ("aclAdministerApps".equals(field.getTagName())) {
+            String text = ((Text)field.getFirstChild()).getData().trim();
+            acls.put(QueueACL.ADMINISTER_QUEUE, new AccessControlList(text));
+          } 
         }
+        poolAcls.put(poolName, acls);
         if (maxPoolResources.containsKey(poolName) && minPoolResources.containsKey(poolName)
             && Resources.lessThan(maxPoolResources.get(poolName), 
                 minPoolResources.get(poolName))) {
@@ -312,6 +353,7 @@ public class PoolManager {
       this.userMaxAppsDefault = userMaxAppsDefault;
       this.poolMaxAppsDefault = poolMaxAppsDefault;
       this.defaultSchedulingMode = defaultSchedulingMode;
+      this.poolAcls = poolAcls;
       for (String name: poolNamesInAllocFile) {
         Pool pool = getPool(name);
         if (poolModes.containsKey(name)) {
@@ -384,7 +426,7 @@ public class PoolManager {
 
   /**
    * Get all pool names that have been seen either in the allocation file or in
-   * a MapReduce job.
+   * a submitted app.
    */
   public synchronized Collection<String> getPoolNames() {
     List<String> list = new ArrayList<String>();
@@ -417,5 +459,24 @@ public class PoolManager {
     } else {
       return 1.0;
     }
+  }
+  
+  /**
+   * Get the ACLs associated with this pool. If a given ACL is not explicitly
+   * configured, include the default value for that ACL.
+   */
+  public Map<QueueACL, AccessControlList> getPoolAcls(String pool) {
+    HashMap<QueueACL, AccessControlList> out = new HashMap<QueueACL, AccessControlList>();
+
+    if (poolAcls.containsKey(pool)) {
+      out.putAll(poolAcls.get(pool));
+    }
+    if (!out.containsKey(QueueACL.ADMINISTER_QUEUE)) {
+      out.put(QueueACL.ADMINISTER_QUEUE, new AccessControlList("*"));
+    }
+    if (!out.containsKey(QueueACL.SUBMIT_APPLICATIONS)) {
+      out.put(QueueACL.SUBMIT_APPLICATIONS, new AccessControlList("*"));
+    }
+    return out;
   }
 }

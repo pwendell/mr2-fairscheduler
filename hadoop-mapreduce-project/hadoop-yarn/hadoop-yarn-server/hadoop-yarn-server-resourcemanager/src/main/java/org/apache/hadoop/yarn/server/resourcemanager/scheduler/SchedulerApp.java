@@ -230,6 +230,7 @@ public class SchedulerApp {
     // Required sanity check - AM can call 'allocate' to update resource 
     // request without locking the scheduler, hence we need to check
     if (getTotalRequiredResources(priority) <= 0) {
+      LOG.error("Sanity check failed, no containers at priority " + priority);
       return null;
     }
     
@@ -251,12 +252,11 @@ public class SchedulerApp {
     rmContainer.handle(
         new RMContainerEvent(container.getId(), RMContainerEventType.START));
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("allocate: applicationAttemptId=" 
+    LOG.info("allocate: applicationAttemptId=" 
           + container.getId().getApplicationAttemptId() 
           + " container=" + container.getId() + " host="
           + container.getNodeId().getHost() + " type=" + type);
-    }
+    
     RMAuditLogger.logSuccess(getUser(), 
         AuditConstants.ALLOC_CONTAINER, "SchedulerApp", 
         getApplicationId(), container.getId());

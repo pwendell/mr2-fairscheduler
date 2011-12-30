@@ -20,7 +20,6 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 
 /**
  * A {@link WeightAdjuster} implementation that gives a weight boost to new jobs

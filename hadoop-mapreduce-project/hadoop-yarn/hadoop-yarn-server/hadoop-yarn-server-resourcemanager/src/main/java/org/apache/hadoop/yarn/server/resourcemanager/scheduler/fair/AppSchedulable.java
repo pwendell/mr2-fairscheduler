@@ -19,21 +19,15 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import java.nio.ByteBuffer;
-import java.util.List;
-import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerToken;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
-import org.apache.hadoop.yarn.api.records.QueueACL;
-import org.apache.hadoop.yarn.api.records.QueueInfo;
-import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.factories.RecordFactory;
@@ -47,8 +41,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.util.BuilderUtils;
-
-import sun.util.LocaleServiceProviderPool.LocalizedObjectGetter;
 
 public class AppSchedulable extends Schedulable {
   private FairScheduler scheduler;
@@ -80,7 +72,6 @@ public class AppSchedulable extends Schedulable {
     demand = Resources.createResource(0);    
     // Demand is current consumption plus outstanding requests
     Resources.addTo(demand, app.getCurrentConsumption());
-    // NOT INCLUDED: Resources.addTo(demaind, app.getCurrentReservation());
     
     // Add up outstanding resource requests
     for (Priority p : app.getPriorities()) {
@@ -115,21 +106,22 @@ public class AppSchedulable extends Schedulable {
     return Resources.createResource(0);
   }
 
-  @Override
+  /**
+   * Get metrics reference from containing pool.
+   */
   public QueueMetrics getMetrics() {
-    return this.pool.getMetrics();
+    return this.pool.getPoolSchedulable().getMetrics();
   }
 
   @Override
   public double getWeight() {
-    // TODO Still not sure whether this can take something from priority.
-    return 1;
+    return scheduler.getAppWeight(this);
   }
 
   @Override
   public Priority getPriority() {
-    // TODO for now all guys have the same priority. Eventually we'd like to
-    // pass this up from job API.
+    // Right now per-app priorities are not passed to scheduler, 
+    // so everyone has the same priority.
     Priority p = recordFactory.newRecordInstance(Priority.class);
     p.setPriority(1);
     return p;
@@ -189,7 +181,7 @@ public class AppSchedulable extends Schedulable {
       RMContainer rmContainer = application.reserve(node, priority, null,
           container);
       node.reserveResource(application, priority, rmContainer);
-      pool.getMetrics().reserveResource(this.app.getUser(),
+      getMetrics().reserveResource(this.app.getUser(),
           container.getResource());
       scheduler.getRootQueueMetrics().reserveResource(this.app.getUser(),
           container.getResource());
@@ -227,15 +219,11 @@ public class AppSchedulable extends Schedulable {
       SchedulerApp application, Priority priority, 
       ResourceRequest request, NodeType type, boolean reserved) {
  
-    // TODO: log
-    
     // How much does this request need?
     Resource capability = request.getCapability();
 
     // How much does the node have?
     Resource available = node.getAvailableResource();
-
-    assert (available.getMemory() >  0);
 
     Container container = null;
     if (reserved) {
@@ -256,6 +244,12 @@ public class AppSchedulable extends Schedulable {
         // Did the application need this resource?
         return Resources.none();
       }
+      else {
+        // TODO this should subtract resource just assigned
+        // TEMPROARY
+        getMetrics().setAvailableResourcesToQueue(
+            this.scheduler.getClusterCapacity());
+      }
       
 
       // If we had previously made a reservation, delete it
@@ -267,13 +261,10 @@ public class AppSchedulable extends Schedulable {
       node.allocateContainer(application.getApplicationId(), 
           allocatedContainer);
 
-      // TODO log
       return container.getResource();
     } else {
       // The desired container won't fit here, so reserve
       reserve(application, priority, node, container, reserved);
-
-      // TODO log
 
       return request.getCapability();
     }
@@ -290,19 +281,15 @@ public class AppSchedulable extends Schedulable {
       
       // Make sure the application still needs requests at this priority
       if (app.getTotalRequiredResources(priority) == 0) {
-        // Release thie container
-        // TODO: locking?
         this.unreserve(app, priority, node);
         return Resources.none();
       }
       
       else {
         // For each priority, see if we can schedule a node local, rack local
-        // or off switch request
+        // or off switch request. Delay scheduling is not currently implemented.
         for (Priority p : app.getPriorities()) {
           app.addSchedulingOpportunity(priority);
-          
-          // TODO: Delay scheduling
           
           ResourceRequest localRequest = app.getResourceRequest(p, 
               node.getHostName());
@@ -339,21 +326,24 @@ public class AppSchedulable extends Schedulable {
         
         ResourceRequest localRequest = app.getResourceRequest(priority, 
             node.getHostName());
-        if (localRequest != null) {
+        if (localRequest != null && localRequest.getNumContainers() != 0) {
+          LOG.debug("Assigning node local containers at priority " + priority);
           return assignContainer(node, app, priority, 
               localRequest, NodeType.NODE_LOCAL, false);
         }
         
         ResourceRequest rackLocalRequest = app.getResourceRequest(priority, 
             node.getRackName());
-        if (rackLocalRequest != null) {
+        LOG.debug("Assigning rack local containers at priority " + priority);
+        if (rackLocalRequest != null && rackLocalRequest.getNumContainers() != 0) {
           return assignContainer(node, app, priority, rackLocalRequest,
               NodeType.RACK_LOCAL, false);
         }
         
         ResourceRequest offSwitchRequest = app.getResourceRequest(priority, 
             RMNode.ANY);
-        if (offSwitchRequest != null) {
+        LOG.debug("Assigning 'any' containers at priority " + priority);
+        if (offSwitchRequest != null && offSwitchRequest.getNumContainers() != 0) {
           return assignContainer(node, app, priority, offSwitchRequest,
               NodeType.OFF_SWITCH, false);
         }
@@ -361,28 +351,5 @@ public class AppSchedulable extends Schedulable {
     }
     
     return Resources.none();
-  }
-
-  @Override
-  public String getQueueName() {
-    return getName();
-  }
-
-  @Override
-  public Map<QueueACL, AccessControlList> getQueueAcls() {
-    // TODO Auto-generated method stub
-    return null;
-  }
-
-  @Override
-  public QueueInfo getQueueInfo(boolean includeChildQueues, boolean recursive) {
-    // TODO Auto-generated method stub
-    return null;
-  }
-
-  @Override
-  public List<QueueUserACLInfo> getQueueUserAclInfo(UserGroupInformation user) {
-    // TODO Auto-generated method stub
-    return null;
   }
 }

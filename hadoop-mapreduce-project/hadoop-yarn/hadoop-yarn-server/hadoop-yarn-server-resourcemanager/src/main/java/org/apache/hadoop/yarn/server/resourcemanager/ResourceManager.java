@@ -291,6 +291,8 @@ public class ResourceManager extends CompositeService implements Recoverable {
           }
 
           try {
+            LOG.debug("Handling the event " + event.getClass().getName() + "."
+                + event.toString());
             scheduler.handle(event);
           } catch (Throwable t) {
             LOG.error("Error in handling event type " + event.getType()
@@ -325,6 +327,8 @@ public class ResourceManager extends CompositeService implements Recoverable {
               + remCapacity);
         }
         this.eventQueue.put(event);
+        LOG.debug("Queued the event " + event.getClass().getName() + "."
+            + event.toString());
       } catch (InterruptedException e) {
         throw new YarnException(e);
       }

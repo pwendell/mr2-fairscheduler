@@ -18,9 +18,11 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -33,16 +35,18 @@ import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
+import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 
-public class PoolSchedulable extends Schedulable {
+public class PoolSchedulable extends Schedulable implements Queue {
   public static final Log LOG = LogFactory.getLog(
       PoolSchedulable.class.getName());
   
@@ -59,7 +63,6 @@ public class PoolSchedulable extends Schedulable {
     this.scheduler = scheduler;
     this.pool = pool;
     this.poolMgr = scheduler.getPoolManager();
-    long currentTime = System.currentTimeMillis();
     this.metrics = QueueMetrics.forQueue(this.getName(), null, true);
     
   }
@@ -190,10 +193,6 @@ public class PoolSchedulable extends Schedulable {
     return appScheds;
   }
 
-  protected String getMetricsContextName() {
-    return "pools";
-  }
-
   @Override
   public QueueMetrics getMetrics() {
     return metrics;
@@ -216,26 +215,46 @@ public class PoolSchedulable extends Schedulable {
   }
 
   @Override
-  public String getQueueName() {
-    // TODO Auto-generated method stub
-    return null;
-  }
-
-  @Override
   public Map<QueueACL, AccessControlList> getQueueAcls() {
-    // TODO Auto-generated method stub
-    return null;
+    Map<QueueACL, AccessControlList> acls = this.poolMgr.getPoolAcls(this.getName());
+    return new HashMap<QueueACL, AccessControlList>(acls);
   }
 
   @Override
   public QueueInfo getQueueInfo(boolean includeChildQueues, boolean recursive) {
-    // TODO Auto-generated method stub
-    return null;
+    QueueInfo queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
+    queueInfo.setQueueName(getQueueName());
+    // TODO: we might change these queue metrics around a little bit
+    // to match the semantics of the fiar scheduler.
+    queueInfo.setCapacity(getFairShare().getMemory() / 
+        scheduler.getClusterCapacity().getMemory());
+    queueInfo.setCapacity(getResourceUsage().getMemory() / 
+        scheduler.getClusterCapacity().getMemory());
+    
+    queueInfo.setChildQueues(new ArrayList<QueueInfo>());
+    queueInfo.setQueueState(QueueState.RUNNING);
+    return queueInfo;
   }
 
   @Override
   public List<QueueUserACLInfo> getQueueUserAclInfo(UserGroupInformation user) {
-    // TODO Auto-generated method stub
-    return null;
+    QueueUserACLInfo userAclInfo = 
+      recordFactory.newRecordInstance(QueueUserACLInfo.class);
+    List<QueueACL> operations = new ArrayList<QueueACL>();
+    for (QueueACL operation : QueueACL.values()) {
+      Map<QueueACL, AccessControlList> acls = this.poolMgr.getPoolAcls(this.getName());
+      if (acls.get(operation).isUserAllowed(user)) {
+        operations.add(operation);
+      }
+    }
+
+    userAclInfo.setQueueName(getQueueName());
+    userAclInfo.setUserAcls(operations);
+    return Collections.singletonList(userAclInfo);
+  }
+
+  @Override
+  public String getQueueName() {
+    return getName();
   }
 }

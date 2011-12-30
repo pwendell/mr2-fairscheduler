@@ -1,6 +1,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -9,14 +10,18 @@ import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
@@ -25,7 +30,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.Store;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.StoreFactory;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
@@ -230,6 +238,27 @@ public class TestFairScheduler {
   }
   
   @Test
+  public void testUserAsDefaultQueue() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairScheduler.CONFIG_PREFIX + ".user-as-default-queue", "true");
+    scheduler.reinitialize(conf, null, resourceManager.getRMContext());
+    AppAddedSchedulerEvent appAddedEvent = new AppAddedSchedulerEvent(
+        createAppAttemptId(1, 1), "default", "user1");
+    scheduler.handle(appAddedEvent);
+    assertEquals(1, scheduler.getPoolManager().getPool("user1").getApplications().size());
+    assertEquals(0, scheduler.getPoolManager().getPool("default").getApplications().size());
+    
+    conf.set(FairScheduler.CONFIG_PREFIX + ".user-as-default-queue", "false");
+    scheduler.reinitialize(conf, null, resourceManager.getRMContext());
+    AppAddedSchedulerEvent appAddedEvent2 = new AppAddedSchedulerEvent(
+        createAppAttemptId(2, 1), "default", "user2");
+    scheduler.handle(appAddedEvent2);
+    assertEquals(1, scheduler.getPoolManager().getPool("user1").getApplications().size());
+    assertEquals(1, scheduler.getPoolManager().getPool("default").getApplications().size());
+    assertEquals(0, scheduler.getPoolManager().getPool("user2").getApplications().size());
+  }
+  
+  @Test
   public void testFairShareWithMinAlloc() throws Exception {
     Configuration conf = new Configuration();
     conf.set(FairScheduler.CONFIG_PREFIX + ".allocation.file", ALLOC_FILE);
@@ -314,6 +343,28 @@ public class TestFairScheduler {
   }
   
   @Test
+  public void testAppAdditionAndRemoval() throws Exception {
+    AppAddedSchedulerEvent appAddedEvent1 = new AppAddedSchedulerEvent(
+        createAppAttemptId(1, 1), "default", "user1");
+    scheduler.handle(appAddedEvent1);
+    
+    // Scheduler should have one pool (the default)
+    assertEquals(1, scheduler.getPoolManager().getPools().size());
+    
+    // That pool should have one app
+    assertEquals(1, scheduler.getPoolManager().getPool("default").getApplications().size());
+
+    AppRemovedSchedulerEvent appRemovedEvent1 = new AppRemovedSchedulerEvent(
+        createAppAttemptId(1, 1), RMAppAttemptState.FINISHED);
+    
+    // Now remove app
+    scheduler.handle(appRemovedEvent1);
+    
+    // Default pool should have no apps
+    assertEquals(0, scheduler.getPoolManager().getPool("default").getApplications().size());
+  }
+  
+  @Test
   public void testAllocationFileParsing() throws Exception {
     Configuration conf = new Configuration();
     conf.set(FairScheduler.CONFIG_PREFIX + ".allocation.file", ALLOC_FILE);
@@ -329,9 +380,11 @@ public class TestFairScheduler {
     // Give pool B a minimum of 2048 M
     out.println("<pool name=\"poolB\">");
     out.println("<minResources>2048</minResources>");
+    out.println("<aclAdministerApps>alice,bob admins</aclAdministerApps>");
     out.println("</pool>");
     // Give pool C no minimum
     out.println("<pool name=\"poolC\">");
+    out.println("<aclSubmitApps>alice,bob admins</aclSubmitApps>");
     out.println("</pool>");
     // Give pool D a limit of 3 running apps
     out.println("<pool name=\"poolD\">");
@@ -362,9 +415,9 @@ public class TestFairScheduler {
     
     assertEquals(6, poolManager.getPools().size()); // 5 in file + default pool
     assertEquals(Resources.createResource(0), 
-        poolManager.getMinResources(Pool.DEFAULT_POOL_NAME));
+        poolManager.getMinResources(YarnConfiguration.DEFAULT_QUEUE_NAME));
     assertEquals(Resources.createResource(0), 
-        poolManager.getMinResources(Pool.DEFAULT_POOL_NAME));
+        poolManager.getMinResources(YarnConfiguration.DEFAULT_QUEUE_NAME));
 
     assertEquals(Resources.createResource(1024),
         poolManager.getMinResources("poolA"));
@@ -377,7 +430,7 @@ public class TestFairScheduler {
     assertEquals(Resources.createResource(0),
         poolManager.getMinResources("poolE"));
 
-    assertEquals(15, poolManager.getPoolMaxApps(Pool.DEFAULT_POOL_NAME));
+    assertEquals(15, poolManager.getPoolMaxApps(YarnConfiguration.DEFAULT_QUEUE_NAME));
     assertEquals(15, poolManager.getPoolMaxApps("poolA"));
     assertEquals(15, poolManager.getPoolMaxApps("poolB"));
     assertEquals(15, poolManager.getPoolMaxApps("poolC"));
@@ -386,9 +439,26 @@ public class TestFairScheduler {
     assertEquals(10, poolManager.getUserMaxApps("user1"));
     assertEquals(5, poolManager.getUserMaxApps("user2"));
     
+    // Unspecified pools should get default ACL
+    Map<QueueACL, AccessControlList> aclsA = poolManager.getPoolAcls("poolA");
+    assertTrue(aclsA.containsKey(QueueACL.ADMINISTER_QUEUE));
+    assertEquals("*", aclsA.get(QueueACL.ADMINISTER_QUEUE).getAclString());
+    assertTrue(aclsA.containsKey(QueueACL.SUBMIT_APPLICATIONS));
+    assertEquals("*", aclsA.get(QueueACL.SUBMIT_APPLICATIONS).getAclString());
+    
+    // Pool B ACL
+    Map<QueueACL, AccessControlList> aclsB = poolManager.getPoolAcls("poolB");
+    assertTrue(aclsB.containsKey(QueueACL.ADMINISTER_QUEUE));
+    assertEquals("alice,bob admins", aclsB.get(QueueACL.ADMINISTER_QUEUE).getAclString());    
+
+    // Pool c ACL
+    Map<QueueACL, AccessControlList> aclsC = poolManager.getPoolAcls("poolC");
+    assertTrue(aclsC.containsKey(QueueACL.SUBMIT_APPLICATIONS));
+    assertEquals("alice,bob admins", aclsC.get(QueueACL.SUBMIT_APPLICATIONS).getAclString());    
+
     /** Not currently supported
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout(
-        Pool.DEFAULT_POOL_NAME));
+        YarnConfiguration.DEFAULT_QUEUE_NAME));
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout("poolA"));
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout("poolB"));
     assertEquals(120000, poolManager.getMinSharePreemptionTimeout("poolC"));
